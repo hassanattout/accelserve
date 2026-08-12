@@ -55,3 +55,12 @@ def test_infer_endpoint():
     assert data["batch_size"] == 1
     assert len(data["outputs"]) == 1
     assert len(data["outputs"][0]) == 1000
+
+def test_metrics_endpoint():
+    client = TestClient(app)
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert "accelserve_requests_total" in response.text
+    assert "accelserve_inference_latency_seconds" in response.text

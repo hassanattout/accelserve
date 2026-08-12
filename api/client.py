@@ -1,45 +1,95 @@
 import time
-import requests
 import random
+import statistics
+import requests
 
 URL = "http://127.0.0.1:8000/infer"
 
-BATCH_SIZE = 1
 INPUT_DIM = 1024
+BATCH_SIZES = [1, 8, 32]
 
-payload = {
-    "inputs": [
-        [
-            random.uniform(-1.0, 1.0)
-            for _ in range(INPUT_DIM)
+RUNS = 10
+
+
+def make_payload(batch_size):
+    return {
+        "inputs": [
+            [
+                random.uniform(-1.0, 1.0)
+                for _ in range(INPUT_DIM)
+            ]
+            for _ in range(batch_size)
         ]
-        for _ in range(BATCH_SIZE)
-    ]
-}
+    }
 
-start = time.perf_counter()
 
-response = requests.post(
-    URL,
-    json=payload,
-    timeout=30
-)
+print("AccelServe HTTP Batch Benchmark")
+print("===============================")
 
-end = time.perf_counter()
+for batch_size in BATCH_SIZES:
 
-response.raise_for_status()
+    model_times = []
+    http_times = []
 
-result = response.json()
+    payload = make_payload(batch_size)
 
-http_latency_ms = (
-    end - start
-) * 1000.0
+    for _ in range(RUNS):
 
-print("AccelServe HTTP Inference Test")
-print("==============================")
-print("Status:", response.status_code)
-print("Batch size:", result["batch_size"])
-print("Model latency:", round(result["latency_ms"], 4), "ms")
-print("HTTP end-to-end latency:", round(http_latency_ms, 4), "ms")
-print("Device:", result["device"])
-print("Output length:", len(result["outputs"][0]))
+        start = time.perf_counter()
+
+        response = requests.post(
+            URL,
+            json=payload,
+            timeout=60
+        )
+
+        end = time.perf_counter()
+
+        response.raise_for_status()
+
+        result = response.json()
+
+        model_times.append(
+            result["latency_ms"]
+        )
+
+        http_times.append(
+            (end - start) * 1000.0
+        )
+
+    model_median = statistics.median(
+        model_times
+    )
+
+    http_median = statistics.median(
+        http_times
+    )
+
+    overhead = (
+        http_median - model_median
+    )
+
+    throughput = (
+        batch_size
+        /
+        (http_median / 1000.0)
+    )
+
+    print()
+    print(f"Batch size: {batch_size}")
+    print(
+        f"Model median:      "
+        f"{model_median:.2f} ms"
+    )
+    print(
+        f"HTTP median:       "
+        f"{http_median:.2f} ms"
+    )
+    print(
+        f"Serving overhead:  "
+        f"{overhead:.2f} ms"
+    )
+    print(
+        f"HTTP throughput:   "
+        f"{throughput:.2f} samples/s"
+    )

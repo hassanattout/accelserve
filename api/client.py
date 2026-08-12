@@ -3,7 +3,14 @@ import random
 import statistics
 import requests
 
-URL = "http://127.0.0.1:8000/infer"
+import os
+
+BASE_URL = os.getenv(
+    "ACCELSERVE_URL",
+    "http://127.0.0.1:8000"
+)
+
+URL = f"{BASE_URL}/infer"
 
 INPUT_DIM = 1024
 BATCH_SIZES = [1, 8, 32]

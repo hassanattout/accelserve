@@ -1,0 +1,8 @@
+.git
+build
+__pycache__
+*.pyc
+.DS_Store
+*.engine
+*.onnx
+*.onnx.data

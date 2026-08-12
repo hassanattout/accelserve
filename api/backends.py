@@ -1,30 +1,12 @@
 import os
 
 import torch
-import torch.nn as nn
 
-
-INPUT_DIM = 1024
-HIDDEN_DIM = 4096
-OUTPUT_DIM = 1000
-
-
-class InferenceMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.net = nn.Sequential(
-            nn.Linear(INPUT_DIM, HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Linear(HIDDEN_DIM, OUTPUT_DIM)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
+from inference.model import (
+    INPUT_DIM,
+    OUTPUT_DIM,
+    create_model,
+)
 class PyTorchBackend:
     def __init__(self):
         self.device = (
@@ -34,7 +16,7 @@ class PyTorchBackend:
         )
 
         self.model = (
-            InferenceMLP()
+            create_model()
             .eval()
             .to(self.device)
         )

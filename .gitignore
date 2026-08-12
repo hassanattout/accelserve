@@ -3,3 +3,9 @@ build/
 
 __pycache__/
 *.pyc
+
+# Generated inference artifacts
+inference/*.pt
+inference/*.onnx
+inference/*.onnx.data
+inference/*.engine

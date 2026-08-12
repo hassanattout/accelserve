@@ -12,6 +12,13 @@ RUN python3 -m pip install --no-cache-dir \
 COPY api ./api
 COPY inference ./inference
 
+COPY docker/entrypoint.gpu.sh /app/entrypoint.gpu.sh
+
+RUN chmod +x /app/entrypoint.gpu.sh
+
+ENV ACCELSERVE_BACKEND=tensorrt
+ENV ACCELSERVE_ENGINE_PATH=/app/inference/accelserve_mlp_fp16.engine
+
 EXPOSE 8000
 
-CMD ["python3", "-m", "uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/app/entrypoint.gpu.sh"]

@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: accelserve
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: accelserve
+
+  template:
+    metadata:
+      labels:
+        app: accelserve
+
+    spec:
+      containers:
+        - name: accelserve
+
+          image: accelserve:gpu
+
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 8000
+
+          env:
+            - name: ACCELSERVE_BACKEND
+              value: "tensorrt"
+
+            - name: ACCELSERVE_ENGINE_PATH
+              value: "/app/inference/accelserve_mlp_fp16_native_io.engine"
+
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+
+            initialDelaySeconds: 10
+            periodSeconds: 5
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+
+            initialDelaySeconds: 20
+            periodSeconds: 10

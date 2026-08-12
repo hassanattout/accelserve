@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+
+metadata:
+  name: accelserve-cpu
+
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: accelserve-cpu
+
+  template:
+    metadata:
+      labels:
+        app: accelserve-cpu
+
+    spec:
+      containers:
+        - name: accelserve
+
+          image: accelserve:cpu-slim
+
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - containerPort: 8000
+
+          env:
+            - name: ACCELSERVE_BACKEND
+              value: "pytorch"
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+
+            initialDelaySeconds: 10
+            periodSeconds: 10

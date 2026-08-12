@@ -1,51 +1,18 @@
+import time
+import torch
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List
-import time
-import torch
-import torch.nn as nn
+
+from api.backends import (
+    INPUT_DIM,
+    create_backend
+)
 
 
-# ============================================================
-# Configuration
-# ============================================================
+backend = create_backend()
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-INPUT_DIM = 1024
-HIDDEN_DIM = 4096
-OUTPUT_DIM = 1000
-
-
-# ============================================================
-# Model
-# ============================================================
-
-class InferenceMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.net = nn.Sequential(
-            nn.Linear(INPUT_DIM, HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Linear(HIDDEN_DIM, OUTPUT_DIM)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-model = InferenceMLP().eval().to(DEVICE)
-
-if DEVICE == "cuda":
-    model = model.half()
-
-
-# ============================================================
-# API schema
-# ============================================================
 
 class InferenceRequest(BaseModel):
     inputs: List[List[float]]
@@ -55,26 +22,26 @@ class InferenceResponse(BaseModel):
     outputs: List[List[float]]
     batch_size: int
     latency_ms: float
+    backend: str
     device: str
 
-
-# ============================================================
-# FastAPI
-# ============================================================
 
 app = FastAPI(
     title="AccelServe",
     description="GPU-accelerated AI inference service",
-    version="0.1.0"
+    version="0.2.0"
 )
 
 
 @app.get("/health")
 def health():
+
     return {
         "status": "ok",
-        "device": DEVICE,
-        "cuda_available": torch.cuda.is_available()
+        "backend": backend.name,
+        "device": backend.device,
+        "cuda_available":
+            torch.cuda.is_available()
     }
 
 
@@ -82,7 +49,9 @@ def health():
     "/infer",
     response_model=InferenceResponse
 )
-def infer(request: InferenceRequest):
+def infer(
+    request: InferenceRequest
+):
 
     if len(request.inputs) == 0:
         raise HTTPException(
@@ -91,7 +60,9 @@ def infer(request: InferenceRequest):
         )
 
     for row in request.inputs:
+
         if len(row) != INPUT_DIM:
+
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -100,45 +71,29 @@ def infer(request: InferenceRequest):
                 )
             )
 
-    dtype = (
-        torch.float16
-        if DEVICE == "cuda"
-        else torch.float32
-    )
+    try:
 
-    x = torch.tensor(
-        request.inputs,
-        dtype=dtype,
-        device=DEVICE
-    )
+        start = time.perf_counter()
 
-    if DEVICE == "cuda":
-        torch.cuda.synchronize()
+        outputs = backend.infer(
+            request.inputs
+        )
 
-    start = time.perf_counter()
+        end = time.perf_counter()
 
-    with torch.inference_mode():
-        output = model(x)
+    except Exception as exc:
 
-    if DEVICE == "cuda":
-        torch.cuda.synchronize()
-
-    end = time.perf_counter()
-
-    latency_ms = (
-        end - start
-    ) * 1000.0
-
-    output_cpu = (
-        output
-        .float()
-        .cpu()
-        .tolist()
-    )
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc)
+        ) from exc
 
     return InferenceResponse(
-        outputs=output_cpu,
+        outputs=outputs,
         batch_size=len(request.inputs),
-        latency_ms=latency_ms,
-        device=DEVICE
+        latency_ms=(
+            end - start
+        ) * 1000.0,
+        backend=backend.name,
+        device=backend.device
     )

@@ -1,6 +1,7 @@
 import argparse
 import statistics
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
@@ -26,10 +27,42 @@ def percentile(values, p):
     )
 
 
+def send_request(url, payload):
+    start = time.perf_counter()
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=30,
+        )
+
+        end = time.perf_counter()
+
+        latency_ms = (
+            end - start
+        ) * 1000.0
+
+        if response.status_code != 200:
+            return False, latency_ms
+
+        return True, latency_ms
+
+    except requests.RequestException:
+        end = time.perf_counter()
+
+        latency_ms = (
+            end - start
+        ) * 1000.0
+
+        return False, latency_ms
+
+
 def run_load_test(
     url,
     batch_size,
     requests_count,
+    concurrency,
 ):
     payload = {
         "inputs": [
@@ -41,41 +74,38 @@ def run_load_test(
     latencies_ms = []
     errors = 0
 
-    print("AccelServe HTTP Load Test")
-    print("========================")
+    print("AccelServe Concurrent HTTP Load Test")
+    print("===================================")
     print(f"URL: {url}")
     print(f"Batch size: {batch_size}")
     print(f"Requests: {requests_count}")
+    print(f"Concurrency: {concurrency}")
     print()
 
     start_total = time.perf_counter()
 
-    for _ in range(requests_count):
-        start = time.perf_counter()
+    with ThreadPoolExecutor(
+        max_workers=concurrency
+    ) as executor:
 
-        try:
-            response = requests.post(
+        futures = [
+            executor.submit(
+                send_request,
                 url,
-                json=payload,
-                timeout=30,
+                payload,
             )
+            for _ in range(requests_count)
+        ]
 
-            end = time.perf_counter()
+        for future in as_completed(futures):
+            success, latency_ms = future.result()
 
-            if response.status_code != 200:
+            if success:
+                latencies_ms.append(
+                    latency_ms
+                )
+            else:
                 errors += 1
-                continue
-
-            latency_ms = (
-                end - start
-            ) * 1000.0
-
-            latencies_ms.append(
-                latency_ms
-            )
-
-        except requests.RequestException:
-            errors += 1
 
     end_total = time.perf_counter()
 
@@ -172,10 +202,17 @@ if __name__ == "__main__":
         default=100,
     )
 
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+    )
+
     args = parser.parse_args()
 
     run_load_test(
         url=args.url,
         batch_size=args.batch_size,
         requests_count=args.requests,
+        concurrency=args.concurrency,
     )

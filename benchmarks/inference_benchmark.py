@@ -1,22 +1,27 @@
-import time
-import statistics
+import json
+import os
+from pathlib import Path
+
 import torch
-import torch.nn as nn
 import tensorrt as trt
 
-torch.manual_seed(0)
+from inference.model import (
+    INPUT_DIM,
+    OUTPUT_DIM,
+    create_model,
+    model_fingerprint,
+)
 
 DEVICE = "cuda:0"
 
 BATCH_SIZE = 256
-INPUT_DIM = 1024
-HIDDEN_DIM = 4096
-OUTPUT_DIM = 1000
-
 WARMUP_RUNS = 20
 BENCHMARK_RUNS = 200
 
-ENGINE_PATH = "inference/accelserve_mlp_fp16_native_io.engine"
+ENGINE_PATH = os.getenv(
+    "ACCELSERVE_ENGINE_PATH",
+    "inference/accelserve_mlp_fp16.engine",
+)
 
 
 # ============================================================
@@ -61,32 +66,22 @@ def summarize(name, times_ms):
     }
 
 
-# ============================================================
-# Model
-# ============================================================
-
-class InferenceMLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-        self.net = nn.Sequential(
-            nn.Linear(INPUT_DIM, HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
-            nn.ReLU(),
-            nn.Linear(HIDDEN_DIM, OUTPUT_DIM)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
 model = (
-    InferenceMLP()
+    create_model()
     .eval()
     .to(DEVICE)
     .half()
 )
+fingerprint = model_fingerprint(create_model().eval())
+
+manifest_path = Path(f"{ENGINE_PATH}.json")
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+if manifest["model_fingerprint"] != fingerprint:
+    raise RuntimeError(
+        "Benchmark model does not match the TensorRT engine manifest"
+    )
+if not manifest["minimum_batch_size"] <= BATCH_SIZE <= manifest["maximum_batch_size"]:
+    raise RuntimeError("Benchmark batch size is outside the engine profile")
 
 x = torch.randn(
     BATCH_SIZE,
@@ -155,6 +150,10 @@ if context is None:
     raise RuntimeError(
         "TensorRT context creation failed"
     )
+
+if engine.get_tensor_shape("input")[0] == -1:
+    if not context.set_input_shape("input", (BATCH_SIZE, INPUT_DIM)):
+        raise RuntimeError("TensorRT rejected the benchmark input shape")
 
 trt_output = torch.empty(
     BATCH_SIZE,
@@ -363,6 +362,8 @@ print(
 print(
     f"Runs: {BENCHMARK_RUNS}"
 )
+
+print(f"Model fingerprint: {fingerprint}")
 
 print()
 

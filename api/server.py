@@ -16,10 +16,10 @@ from pydantic import BaseModel, Field
 
 from api.backends import INPUT_DIM, create_backend
 
-MAX_BATCH_SIZE = 256
-MODEL_VERSION = "demo-mlp-v1"
 logger = logging.getLogger("accelserve")
 backend = create_backend()
+MAX_BATCH_SIZE = min(256, backend.maximum_batch_size)
+MODEL_VERSION = f"demo-mlp-{backend.model_fingerprint[:12]}"
 
 
 class InferenceRequest(BaseModel):
@@ -65,6 +65,7 @@ def health():
         "device": backend.device,
         "cuda_available": torch.cuda.is_available(),
         "model_version": MODEL_VERSION,
+        "model_fingerprint": backend.model_fingerprint,
         "input_dimension": INPUT_DIM,
         "maximum_batch_size": MAX_BATCH_SIZE,
     }

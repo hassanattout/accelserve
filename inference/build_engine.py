@@ -1,14 +1,19 @@
+import json
 import os
+from pathlib import Path
 
 import torch
 
 from inference.model import (
     INPUT_DIM,
+    OUTPUT_DIM,
     create_model,
+    model_fingerprint,
 )
 
-
-BATCH_SIZE = 256
+MIN_BATCH_SIZE = 1
+OPT_BATCH_SIZE = 32
+MAX_BATCH_SIZE = 256
 
 ONNX_PATH = os.getenv(
     "ACCELSERVE_ONNX_PATH",
@@ -21,17 +26,19 @@ ENGINE_PATH = os.getenv(
 )
 
 
+def engine_manifest_path():
+    return Path(f"{ENGINE_PATH}.json")
+
+
 def export_onnx():
     print("Creating deterministic PyTorch model...")
 
-    model = (
-        create_model()
-        .eval()
-        .half()
-    )
+    Path(ONNX_PATH).parent.mkdir(parents=True, exist_ok=True)
+
+    model = create_model().eval().half()
 
     dummy_input = torch.randn(
-        BATCH_SIZE,
+        OPT_BATCH_SIZE,
         INPUT_DIM,
         dtype=torch.float16,
     )
@@ -47,7 +54,12 @@ def export_onnx():
         ONNX_PATH,
         input_names=["input"],
         output_names=["output"],
+        dynamic_axes={
+            "input": {0: "batch"},
+            "output": {0: "batch"},
+        },
         opset_version=18,
+        dynamo=False,
     )
 
     print("FP16 ONNX export complete.")
@@ -65,6 +77,8 @@ def build_tensorrt_engine():
         f"Building TensorRT engine from: "
         f"{ONNX_PATH}"
     )
+
+    Path(ENGINE_PATH).parent.mkdir(parents=True, exist_ok=True)
 
     logger = trt.Logger(
         trt.Logger.WARNING
@@ -112,6 +126,15 @@ def build_tensorrt_engine():
         1 << 30,
     )
 
+    profile = builder.create_optimization_profile()
+    profile.set_shape(
+        "input",
+        (MIN_BATCH_SIZE, INPUT_DIM),
+        (OPT_BATCH_SIZE, INPUT_DIM),
+        (MAX_BATCH_SIZE, INPUT_DIM),
+    )
+    config.add_optimization_profile(profile)
+
     print(
         "Compiling TensorRT engine..."
     )
@@ -152,6 +175,23 @@ def build_tensorrt_engine():
         f"Engine size: "
         f"{engine_size_mb:.2f} MB"
     )
+
+    model = create_model().eval()
+    manifest = {
+        "format_version": 1,
+        "model_fingerprint": model_fingerprint(model),
+        "input_dimension": INPUT_DIM,
+        "output_dimension": OUTPUT_DIM,
+        "minimum_batch_size": MIN_BATCH_SIZE,
+        "optimum_batch_size": OPT_BATCH_SIZE,
+        "maximum_batch_size": MAX_BATCH_SIZE,
+        "precision": "fp16",
+    }
+    engine_manifest_path().write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Engine manifest saved to: {engine_manifest_path()}")
 
 
 if __name__ == "__main__":

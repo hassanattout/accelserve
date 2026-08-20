@@ -1,13 +1,12 @@
-FROM nvcr.io/nvidia/tensorrt:25.08-py3
+FROM nvcr.io/nvidia/pytorch:25.08-py3
 
 WORKDIR /app
 
+COPY requirements.txt .
+
 RUN python3 -m pip install --no-cache-dir \
-    fastapi \
-    "uvicorn[standard]" \
-    pydantic \
-    requests \
-    numpy
+    -r requirements.txt \
+    "onnx>=1.17,<2"
 
 COPY api ./api
 COPY inference ./inference
@@ -20,5 +19,8 @@ ENV ACCELSERVE_BACKEND=tensorrt
 ENV ACCELSERVE_ENGINE_PATH=/app/inference/accelserve_mlp_fp16.engine
 
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
 
 ENTRYPOINT ["/app/entrypoint.gpu.sh"]

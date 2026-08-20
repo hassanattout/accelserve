@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from api import server
-from inference.model import create_model
+from inference.model import create_model, model_fingerprint
 
 client = TestClient(server.app)
 
@@ -16,6 +16,7 @@ def test_model_is_deterministic():
     assert state_a.keys() == state_b.keys()
     for key in state_a:
         assert state_a[key].equal(state_b[key])
+    assert model_fingerprint(model_a) == model_fingerprint(model_b)
 
 
 def test_health_endpoint():
@@ -28,6 +29,7 @@ def test_health_endpoint():
     assert data["device"] == "cpu"
     assert data["cuda_available"] is False
     assert data["model_version"] == server.MODEL_VERSION
+    assert data["model_fingerprint"] == server.backend.model_fingerprint
     assert data["input_dimension"] == 1024
     assert data["maximum_batch_size"] == 256
 

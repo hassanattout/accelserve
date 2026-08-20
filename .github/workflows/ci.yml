@@ -32,4 +32,14 @@ jobs:
         env:
           ACCELSERVE_BACKEND: pytorch
         run: |
-          pytest -v
+          python -m compileall -q api inference benchmarks tests
+          python -m pytest -v
+
+      - name: Build and run C++ baseline
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+          ./build/cpu_vector_add
+
+      - name: Build CPU container
+        run: docker build --file docker/Dockerfile --tag accelserve:ci .

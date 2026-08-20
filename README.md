@@ -725,7 +725,9 @@ Max absolute error:  0.00244141
 Mean absolute error: 0.00033709
 ```
 
-Strict numerical validation should use identical persisted model weights across both PyTorch and TensorRT.
+The current benchmark validates that PyTorch and TensorRT use the same model
+fingerprint before comparing outputs. This prevents results from being reported
+for engines built from different weights.
 
 ---
 
@@ -1206,18 +1208,18 @@ AccelServe is currently an educational and systems-engineering platform rather t
 Current limitations include:
 
 - the demonstration neural network is intentionally simple
+- the default weights are deterministic demonstration weights, not a trained model
+- trained deployments must provide a checkpoint through `ACCELSERVE_CHECKPOINT_PATH`
 - TensorRT engine files are hardware-specific
 - GPU Docker execution has not yet been validated on an unrestricted NVIDIA Docker host
 - GPU Kubernetes deployment has not yet been executed on a GPU-enabled cluster
 - Nsight Compute hardware counters were blocked by the hosted environment
 - Nsight Systems was unavailable in the hosted environment
-- persistent model versioning is not yet implemented
-- dynamic batching is not yet implemented
+- request aggregation across clients is not implemented
 - binary tensor transport is not yet implemented
 - production authentication is not implemented
 - production observability is not implemented
 - distributed multi-GPU inference is not implemented
-- strict TensorRT numerical validation should use persisted identical model weights
 - benchmark results are specific to the tested hardware and workload
 
 ---
@@ -1232,15 +1234,12 @@ Planned extensions include:
 - add dynamic request batching
 - add asynchronous request handling
 - replace large JSON tensor payloads with binary transport
-- add Prometheus metrics
 - add request tracing
 - add structured logging
 - add p50 / p95 / p99 server metrics
 - add load testing
-- add model versioning
 - add TensorRT engine caching
-- add persistent model checkpoints
-- add stricter numerical validation
+- add a trained and versioned checkpoint artifact
 - add CUDA kernel fusion experiments
 - profile with Nsight Systems
 - profile with Nsight Compute on an unrestricted GPU host
@@ -1251,13 +1250,27 @@ Planned extensions include:
 - investigate INT8 and lower-precision inference
 - investigate distributed inference
 - investigate multi-GPU serving
-- add CI/CD
-- add automated container builds
+- publish versioned container images from CI
 - add automated benchmark regression tests
 
 ---
 
 # Running AccelServe
+
+## Model and engine contract
+
+The PyTorch backend and TensorRT builder load the same model source. By default,
+that source is a deterministic demonstration model. To serve trained weights,
+set `ACCELSERVE_CHECKPOINT_PATH` to a compatible PyTorch state dictionary when
+starting the PyTorch service and when building the TensorRT engine.
+
+Every TensorRT build creates `<engine path>.json`. The manifest records the model
+fingerprint, tensor dimensions, precision, and supported batch range. The service
+requires both the engine and manifest. TensorRT engines accept batches from 1 to
+256, while concurrent calls are serialized around the shared execution context.
+
+The response `model_version` is derived from the model fingerprint, so clients can
+identify the weights that produced a result.
 
 ## Local PyTorch Service
 
@@ -1388,6 +1401,10 @@ and uses:
 ```text
 ACCELSERVE_BACKEND=tensorrt
 ```
+
+The GPU image builds the engine and its manifest on the target NVIDIA host when
+they are not already present. GPU container and Kubernetes execution still need
+validation on the target driver, CUDA, and TensorRT combination.
 
 ---
 

@@ -32,7 +32,7 @@ spec:
               value: "tensorrt"
 
             - name: ACCELSERVE_ENGINE_PATH
-              value: "/app/inference/accelserve_mlp_fp16_native_io.engine"
+              value: "/app/inference/accelserve_mlp_fp16.engine"
 
           resources:
             limits:

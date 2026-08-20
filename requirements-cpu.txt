@@ -1,7 +1,8 @@
-fastapi
-uvicorn[standard]
-pydantic
-requests
-numpy
-pytest
-httpx
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+pydantic>=2.10,<3
+requests>=2.32,<3
+numpy>=2.0,<3
+pytest>=8,<9
+httpx>=0.28,<1
+prometheus-client>=0.21,<1

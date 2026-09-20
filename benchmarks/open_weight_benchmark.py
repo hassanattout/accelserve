@@ -1,9 +1,15 @@
-"""Compare AccelServe Qwen2.5 with Transformers and optional vLLM."""
+"""Same-host throughput comparison for AccelServe, Transformers and vLLM.
+
+This is a workload harness, not a universal leaderboard. Transformers uses
+batched generation, AccelServe uses concurrent request scheduling, and vLLM
+uses its normal request engine.
+"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import json
 import time
 
@@ -19,6 +25,12 @@ def percentile(values: list[float], p: float) -> float:
     return values[
         min(len(values) - 1, round((len(values) - 1) * p))
     ]
+
+
+def cleanup_cuda() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 async def run_accelserve(
@@ -55,8 +67,9 @@ async def run_accelserve(
     await engine.stop()
 
     tokens = sum(x.generated_tokens for x in results)
-    return {
+    result = {
         "backend": "accelserve",
+        "mode": "concurrent_requests",
         "requests": len(results),
         "wall_s": wall,
         "tokens": tokens,
@@ -78,6 +91,9 @@ async def run_accelserve(
         )
         / len(results),
     }
+    del engine
+    cleanup_cuda()
+    return result
 
 
 def run_transformers(
@@ -100,56 +116,66 @@ def run_transformers(
         )
     )
     dtype = (
-        torch.float16
+        torch.bfloat16
         if target.type == "cuda"
-        else torch.float32
+        and torch.cuda.is_bf16_supported()
+        else (
+            torch.float16
+            if target.type == "cuda"
+            else torch.float32
+        )
     )
+
     tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         torch_dtype=dtype,
         low_cpu_mem_usage=True,
     ).eval().to(target)
 
-    latencies = []
-    generated = 0
-    wall_start = time.perf_counter()
+    inputs = tokenizer(
+        prompts,
+        return_tensors="pt",
+        padding=True,
+    ).to(target)
 
-    for prompt in prompts:
-        inputs = tokenizer(
-            prompt, return_tensors="pt"
-        ).to(target)
-        if target.type == "cuda":
-            torch.cuda.synchronize()
-        started = time.perf_counter()
-        with torch.inference_mode():
-            model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                do_sample=False,
-            )
-        if target.type == "cuda":
-            torch.cuda.synchronize()
-        latencies.append(
-            (time.perf_counter() - started)
-            * 1000.0
+    if target.type == "cuda":
+        torch.cuda.synchronize()
+    started = time.perf_counter()
+    with torch.inference_mode():
+        output = model.generate(
+            **inputs,
+            max_new_tokens=max_tokens,
+            do_sample=False,
+            min_new_tokens=max_tokens,
         )
-        generated += max_tokens
+    if target.type == "cuda":
+        torch.cuda.synchronize()
+    wall = time.perf_counter() - started
 
-    wall = time.perf_counter() - wall_start
-    return {
+    input_length = inputs["input_ids"].shape[1]
+    tokens = int(
+        sum(
+            max(0, row.shape[0] - input_length)
+            for row in output
+        )
+    )
+    result = {
         "backend": "transformers-generate",
+        "mode": "static_batch",
         "requests": len(prompts),
         "wall_s": wall,
-        "tokens": generated,
-        "tokens_per_second": generated / wall,
-        "latency_p50_ms": percentile(
-            latencies, 0.5
-        ),
-        "latency_p95_ms": percentile(
-            latencies, 0.95
-        ),
+        "tokens": tokens,
+        "tokens_per_second": tokens / wall,
+        "batch_latency_ms": wall * 1000.0,
     }
+
+    del output, inputs, model, tokenizer
+    cleanup_cuda()
+    return result
 
 
 def run_vllm(
@@ -168,6 +194,7 @@ def run_vllm(
     params = SamplingParams(
         temperature=0.0,
         max_tokens=max_tokens,
+        min_tokens=max_tokens,
     )
     started = time.perf_counter()
     outputs = llm.generate(
@@ -178,13 +205,17 @@ def run_vllm(
         len(out.outputs[0].token_ids)
         for out in outputs
     )
-    return {
+    result = {
         "backend": "vllm",
+        "mode": "request_engine",
         "requests": len(outputs),
         "wall_s": wall,
         "tokens": tokens,
         "tokens_per_second": tokens / wall,
     }
+    del outputs, llm
+    cleanup_cuda()
+    return result
 
 
 def main() -> None:
@@ -218,6 +249,7 @@ def main() -> None:
         )
         for i in range(args.requests)
     ]
+
     results = []
     for backend in args.backends:
         if backend == "accelserve":
@@ -254,6 +286,10 @@ def main() -> None:
             {
                 "model": args.model,
                 "results": results,
+                "note": (
+                    "Backends use their natural serving modes; "
+                    "compare throughput on the same hardware/software stack."
+                ),
             },
             indent=2,
         )

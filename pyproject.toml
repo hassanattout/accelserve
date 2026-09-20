@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "accelserve"
-version = "0.5.0"
-description = "Reference AI inference runtime with explicit KV caching and continuous batching"
+version = "0.6.0"
+description = "Paged-KV continuous-batching LLM inference runtime"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -20,6 +20,11 @@ dependencies = [
 dev = [
   "httpx>=0.28,<1",
   "pytest>=8,<9",
+]
+open-weight = [
+  "transformers>=4.43,<6",
+  "safetensors>=0.4",
+  "accelerate>=1.0",
 ]
 
 [tool.setuptools.packages.find]

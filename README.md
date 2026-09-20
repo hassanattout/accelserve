@@ -1,192 +1,237 @@
 # AccelServe
 
-**From CUDA kernels to a continuous-batched AI inference runtime.**
+**A from-scratch continuous-batching LLM runtime with physical paged K/V memory.**
 
-AccelServe is a systems-engineering project for understanding the path between low-level GPU execution and production-style model serving.
+AccelServe is a systems-engineering project that connects low-level CUDA/TensorRT work to the internals of modern LLM serving.
 
-The repository now has two complementary tracks:
+## v0.6
 
-1. **GPU performance:** C++, CUDA, shared memory, cuBLAS, Tensor Cores, TensorRT, CUDA Graphs, Docker and Kubernetes.
-2. **Runtime v2:** an inspectable decoder-only transformer runtime with explicit prefill/decode, K/V caches, logical paged-cache allocation, iteration-level continuous batching, sampling, OpenAI-style serving and Prometheus telemetry.
+The runtime now implements:
 
-The goal is not to hide inference behind one framework call. It is to understand where latency, throughput, memory use and scheduling behavior actually come from.
+- preallocated **physical K/V slabs**
+- per-request block tables and page reuse
+- continuous batching with explicit prefill/decode
+- grouped-query attention (GQA)
+- RoPE
+- RMSNorm + gated SiLU MLP
+- real **Qwen2/Qwen2.5 checkpoint loading**
+- AccelServe-owned forward execution and token scheduling
+- TTFT, TPOT, p50/p95/p99 and token-throughput measurement
+- Hugging Face and optional vLLM comparison harness
+- Qwen2.5 logit-parity validation
+- Nsight/NVTX profiling workload
+- optional Triton RMSNorm and RoPE experiments
+- Prometheus request/cache metrics
 
-## Runtime v2
+Transformers is used only to download/deserialise Qwen weights and tokenize text. AccelServe owns the model execution path, scheduler, cache and decoding loop.
 
-Implemented:
+Default open-weight target:
 
-- decoder-only transformer written directly in PyTorch
-- RMSNorm and causal multi-head attention
-- gated SiLU MLP
-- explicit prompt prefill
-- explicit one-token decode
-- per-request tensor K/V caches
-- variable-context batched decode
-- iteration-level continuous batching
-- logical KV block allocator with finite capacity
-- deterministic and stochastic sampling
-- request cleanup on completion/failure
-- OpenAI-style `POST /v1/completions`
-- runtime statistics and Prometheus metrics
-- CPU correctness and concurrency tests
-- concurrent runtime benchmark
-- optional Triton RMSNorm experiment
-
-The built-in reference model is deterministic and randomly initialized. It exists for runtime correctness and systems experimentation, not language quality.
+```text
+Qwen/Qwen2.5-0.5B-Instruct
+```
 
 ## Architecture
 
 ```text
-Client
-  |
-  v
-/v1/completions
-  |
-  v
-Pending queue
-  |
-  v
-Admission + Prefill ----> per-request KV cache
-  |
-  v
-Active request set
-  |
-  v
-Iteration scheduler
-  |
-  v
-Batched 1-token decode
-  |
-  v
-Sampling
-  |
-  +--> unfinished -> next decode iteration
-  |
-  +--> finished -> release KV blocks -> response
+requests
+   |
+   v
+pending queue
+   |
+   v
+prefill -------------------------+
+   |                             |
+   v                             v
+active request set        physical paged KV
+   |                     [layer, block,
+   |                      kv_head, token, dim]
+   v
+iteration scheduler
+   |
+   v
+batched one-token decode
+   |
+   v
+GQA + RoPE
+   |
+   v
+sampling
+   |
+   +---- unfinished -> next iteration
+   |
+   +---- finished -> return blocks -> response
 ```
 
-See [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md).
+See `docs/ARCHITECTURE_V06.md`.
 
-## Quick start
+## Physical paged KV cache
+
+v0.5 tracked pages logically but still grew per-request tensors. v0.6 preallocates the actual K/V backing tensors once.
+
+A request owns a block table such as:
+
+```text
+request A -> [3, 17, 8]
+request B -> [0, 11]
+```
+
+K/V values are written directly into those physical pages. When a request finishes, its pages return to the allocator without reallocating the backing slabs.
+
+The current PyTorch attention path still gathers pages into contiguous tensors before attention. A direct block-table Triton/CUDA paged-attention kernel is the next performance step.
+
+## Reference runtime
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-cpu.txt
 pip install --index-url https://download.pytorch.org/whl/cpu torch
+uvicorn accelserve.api:app --port 8000
+```
+
+## Run Qwen2.5 through AccelServe
+
+```bash
+pip install -e '.[open-weight]'
+
+ACCELSERVE_MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct \
+ACCELSERVE_DEVICE=cuda \
 uvicorn accelserve.api:app --host 0.0.0.0 --port 8000
 ```
 
-Generate:
+Then:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "accelserve-tiny",
-    "prompt": "hello inference",
-    "max_tokens": 16,
-    "temperature": 0.0,
-    "top_k": 0
+    "prompt": "Explain continuous batching in one paragraph.",
+    "max_tokens": 64,
+    "temperature": 0
   }'
 ```
 
-Runtime state:
+The response exposes TTFT, TPOT, total generation time, end-to-end latency, device and KV-cache mode.
+
+## Validate Qwen weight mapping
+
+Before using performance results, validate the custom execution path against Transformers:
 
 ```bash
-curl http://127.0.0.1:8000/v1/runtime/stats
+python benchmarks/validate_qwen2_parity.py \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --device cuda
 ```
 
-Prometheus metrics:
+It reports maximum/mean logit error and next-token argmax agreement. No parity numbers are hard-coded into the repository.
+
+## Compare AccelServe, Transformers and vLLM
 
 ```bash
-curl http://127.0.0.1:8000/metrics
+python benchmarks/open_weight_benchmark.py \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --backends accelserve transformers \
+  --requests 4 \
+  --max-tokens 32 \
+  --device cuda
 ```
 
-## Benchmark
+On a compatible GPU host with vLLM installed:
+
+```bash
+python benchmarks/open_weight_benchmark.py \
+  --backends accelserve transformers vllm \
+  --device cuda
+```
+
+Results are generated on the active host; the repo does not claim universal LLM-serving wins.
+
+## Runtime benchmark
 
 ```bash
 PYTHONPATH=. python benchmarks/runtime_benchmark.py \
   --concurrency 8 \
-  --max-new-tokens 32
+  --max-new-tokens 32 \
+  --device cuda \
+  --json
 ```
 
-The benchmark reports aggregate generated tokens/sec plus mean, p50, p95 and p99 request latency.
+Metrics include TTFT, TPOT, p50/p95/p99 request latency, generated tokens/sec and physical K/V bytes reserved.
 
-## Historical GPU benchmark
+## Triton experiments
 
-On an NVIDIA Tesla T4, batch size 256, 200 runs, FP16:
+Install Triton separately on a supported NVIDIA/Linux environment, then run:
 
-| Runtime | p50 | p95 | p99 | Throughput |
-|---|---:|---:|---:|---:|
-| PyTorch FP16 | 0.8684 ms | 0.8827 ms | 0.8913 ms | 294,805.89 samples/s |
-| TensorRT FP16 | 0.5819 ms | 0.5933 ms | 0.5961 ms | 439,935.11 samples/s |
-| TensorRT + CUDA Graph | 0.5919 ms | 0.6100 ms | 0.6180 ms | 432,514.27 samples/s |
+```bash
+python benchmarks/triton_kernel_benchmark.py
+```
 
-For that fixed MLP workload, TensorRT delivered about **49% higher throughput** than the same-session PyTorch FP16 baseline. These are not LLM-serving results.
+The benchmark validates numerical error and compares the existing Triton RMSNorm plus the v0.6 Triton RoPE experiment against PyTorch reference implementations.
+
+## GPU profiling
+
+```bash
+nsys profile \
+  --trace=cuda,nvtx,osrt \
+  -o accelserve_v06 \
+  python profiling/profile_qwen_runtime.py
+```
+
+The workload emits an NVTX range around the Qwen request batch.
+
+## Historical GPU track
+
+The repository also preserves:
+
+- custom C++/CUDA kernels
+- transfer-vs-compute analysis
+- shared-memory GEMM
+- cuBLAS
+- Tensor Cores / FP16
+- PyTorch inference
+- ONNX / ModelOpt
+- TensorRT
+- CUDA Graphs
+- FastAPI
+- Docker
+- Kubernetes
+
+Historical Tesla T4 fixed-MLP benchmark:
+
+| Runtime | p50 | Throughput |
+|---|---:|---:|
+| PyTorch FP16 | 0.8684 ms | 294,805.89 samples/s |
+| TensorRT FP16 | 0.5819 ms | 439,935.11 samples/s |
+
+Those numbers are **not** Qwen/LLM-serving results.
 
 ## Tests
 
 ```bash
-PYTHONPATH=. pytest -q
+pytest -q
 ```
 
-The v2 suite checks:
+CPU CI covers page allocation, physical K/V writes/reads, fixed backing storage, GQA/RoPE execution, variable-context batched decode, concurrent scheduling, cache cleanup, API metrics and TTFT/TPOT reporting.
 
-- UTF-8 tokenizer round-trip
-- KV allocation, growth and release
-- cache-capacity enforcement
-- prefill/decode cache growth
-- concurrent request handling
-- sequence-capacity validation
-- OpenAI-style API serving
-- Prometheus telemetry
-- batched-decode equivalence against independent decode
+## Next performance milestones
 
-## Existing GPU track
+1. Direct block-table **paged-attention Triton/CUDA kernel**
+2. Integrate measured Triton hot-path kernels
+3. batched prefill
+4. prefix caching
+5. CUDA Graph decode path
+6. speculative decoding
+7. INT8/FP8/KV-cache quantization experiments
+8. NCCL tensor parallelism and multi-GPU worker orchestration
+9. multimodal/VLA serving for Physical AI
 
-The repository also preserves the earlier performance work:
+## Scope
 
-- C++ CPU baselines
-- CUDA vector and GEMM kernels
-- CUDA Events
-- host/device transfer analysis
-- GPU data residency
-- shared-memory tiling
-- cuBLAS comparisons
-- FP16 / Tensor Core benchmarks
-- PyTorch GPU inference
-- ONNX and ModelOpt
-- TensorRT engine build/execution
-- CUDA Graph experiments
-- FastAPI serving
-- Docker image optimization
-- Kubernetes CPU/GPU manifests
-
-## Roadmap
-
-1. Real open-weight Qwen/Gemma/Llama-compatible model adapter while preserving AccelServe-owned scheduling.
-2. Physical paged KV cache with preallocated K/V slabs and block tables.
-3. Measured Triton RMSNorm, RoPE, gated-activation and decode-attention kernels.
-4. Prefix caching and TTFT/cache-hit benchmarks.
-5. Speculative decoding.
-6. Multi-GPU NCCL tensor-parallel serving.
-7. Multimodal/VLA extension for sensor-to-action inference latency.
-
-## Engineering principles
-
-- Benchmark end-to-end, not only kernels.
-- Keep performance claims tied to reproducible workloads.
-- Use vendor libraries when they are better, but understand the lower-level primitive.
-- Keep memory and scheduling visible as first-class inference problems.
-- Do not claim production readiness for a reference implementation.
-
-## Current limitations
-
-Runtime v2 is a reference system, not a production LLM server. The model is random, the tensor KV cache is not physically paged yet, prefill is not batched, and distributed inference is not implemented. Those are explicit next milestones rather than hidden behind a framework abstraction.
+AccelServe is a serious reference implementation and performance-learning platform, not a production replacement for vLLM/SGLang/TensorRT-LLM. Performance claims should come from reproducible benchmarks on named hardware.
 
 ## Author
 
 **Hassan Attout**
 
-AI Systems, GPU Computing and Physical AI Infrastructure
+AI Systems • GPU Computing • Inference Infrastructure • Physical AI

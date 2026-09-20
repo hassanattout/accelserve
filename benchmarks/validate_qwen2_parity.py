@@ -1,9 +1,10 @@
-"""Validate AccelServe's Qwen2.5 prefill logits against Transformers."""
+"""Validate AccelServe Qwen2 prefill logits against Transformers."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 import torch
 
@@ -23,6 +24,17 @@ def main() -> None:
     )
     parser.add_argument(
         "--device", choices=["cpu", "cuda"], default=None
+    )
+    parser.add_argument(
+        "--max-error",
+        type=float,
+        default=None,
+        help="Fail if maximum absolute logit error exceeds this value.",
+    )
+    parser.add_argument(
+        "--require-argmax",
+        action="store_true",
+        help="Fail unless AccelServe and Transformers select the same next token.",
     )
     args = parser.parse_args()
 
@@ -70,15 +82,18 @@ def main() -> None:
 
     accel_logits = state.next_logits.float()
     diff = (accel_logits - hf_logits).abs()
+    max_error = float(diff.max().item())
+    mean_error = float(diff.mean().item())
+    argmax_match = bool(
+        torch.argmax(accel_logits).item()
+        == torch.argmax(hf_logits).item()
+    )
     result = {
         "model": args.model,
         "prompt_tokens": len(ids),
-        "max_abs_logit_error": float(diff.max().item()),
-        "mean_abs_logit_error": float(diff.mean().item()),
-        "argmax_match": bool(
-            torch.argmax(accel_logits).item()
-            == torch.argmax(hf_logits).item()
-        ),
+        "max_abs_logit_error": max_error,
+        "mean_abs_logit_error": mean_error,
+        "argmax_match": argmax_match,
         "accel_argmax": int(
             torch.argmax(accel_logits).item()
         ),
@@ -88,6 +103,26 @@ def main() -> None:
     }
     engine.kv_cache.release(request_id)
     print(json.dumps(result, indent=2))
+
+    failures = []
+    if (
+        args.max_error is not None
+        and max_error > args.max_error
+    ):
+        failures.append(
+            f"max_abs_logit_error={max_error:.6g} "
+            f"> threshold={args.max_error:.6g}"
+        )
+    if args.require_argmax and not argmax_match:
+        failures.append("next-token argmax differs")
+
+    if failures:
+        print(
+            "Parity validation failed: "
+            + "; ".join(failures),
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

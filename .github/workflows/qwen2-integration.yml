@@ -1,0 +1,42 @@
+name: Qwen2 Integration
+
+on:
+  pull_request:
+    paths:
+      - "accelserve/**"
+      - "benchmarks/validate_qwen2_parity.py"
+      - "pyproject.toml"
+      - ".github/workflows/qwen2-integration.yml"
+  workflow_dispatch:
+
+jobs:
+  qwen2-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache Hugging Face model
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: qwen2-tiny-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install CPU dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install             --index-url https://download.pytorch.org/whl/cpu             torch
+          pip install -e ".[open-weight]"
+
+      - name: Validate Qwen2 weight mapping and prefill logits
+        env:
+          TOKENIZERS_PARALLELISM: "false"
+        run: |
+          python benchmarks/validate_qwen2_parity.py             --model Jiqing/tiny-random-qwen2             --device cpu             --max-error 0.001             --require-argmax

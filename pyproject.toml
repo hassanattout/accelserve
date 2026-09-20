@@ -26,6 +26,9 @@ open-weight = [
   "safetensors>=0.4",
   "accelerate>=1.0",
 ]
+gpu-kernels = [
+  "triton>=3.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["accelserve*"]

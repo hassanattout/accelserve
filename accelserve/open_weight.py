@@ -69,11 +69,14 @@ def load_qwen2_pretrained(
         device or ("cuda" if torch.cuda.is_available() else "cpu")
     )
     if dtype is None:
-        dtype = (
-            torch.float16
-            if target_device.type == "cuda"
-            else torch.float32
-        )
+        if target_device.type == "cuda":
+            dtype = (
+                torch.bfloat16
+                if torch.cuda.is_bf16_supported()
+                else torch.float16
+            )
+        else:
+            dtype = torch.float32
 
     hf_model = AutoModelForCausalLM.from_pretrained(
         model_id,
@@ -88,12 +91,14 @@ def load_qwen2_pretrained(
     )
     if (
         not any("Qwen2" in name for name in arch_names)
-        and getattr(hf_config, "model_type", None)
-        not in {"qwen2", "qwen2_moe"}
+        and getattr(hf_config, "model_type", None) != "qwen2"
     ):
         raise ValueError(
             f"{model_id} is not a supported Qwen2-family checkpoint"
         )
+
+    if getattr(hf_config, "hidden_act", "silu") != "silu":
+        raise ValueError("only SiLU Qwen2-family checkpoints are supported")
 
     config = ModelConfig(
         vocab_size=hf_config.vocab_size,
